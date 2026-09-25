@@ -21,6 +21,11 @@ type TransferManifest struct {
 	EffectiveAt   time.Time `json:"effectiveAt"`
 	Evidence      string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode   string    `json:"relatedCode" gorm:"size:64;index"`
+	// 实收重量只允许在签收（或因超差异驳回）时由状态迁移写入；签收后为终态字段，不可改写。
+	ReceivedWeightKg *float64   `json:"receivedWeightKg"`
+	WeightDiffKg     *float64   `json:"weightDiffKg"`
+	WeightDiffReason string     `json:"weightDiffReason" gorm:"size:500"`
+	ReceivedAt       *time.Time `json:"receivedAt"`
 }
 
 func (item *TransferManifest) GetBase() *BaseModel { return &item.BaseModel }

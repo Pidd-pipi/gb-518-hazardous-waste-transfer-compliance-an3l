@@ -16,5 +16,5 @@ export const TRANSITIONS: Readonly<Record<string, Readonly<Record<string, readon
   wasteGenerator: { active: ['restricted', 'suspended', 'expired'], restricted: ['active', 'suspended', 'expired'], suspended: ['active', 'expired'], expired: [] },
   carrierProfile: { pending: ['verified', 'restricted', 'expired'], verified: ['restricted', 'expired'], restricted: ['pending', 'expired'], expired: [] },
   transferManifest: { draft: ['submitted'], submitted: ['in_transit', 'rejected'], in_transit: ['received', 'rejected'], received: [], rejected: [] },
-  complianceCheck: { pending: ['pass', 'fail', 'escalated'], pass: [], fail: ['escalated'], escalated: [] }
+  complianceCheck: { pending: ['pass', 'fail'], pass: [], fail: ['escalated'], escalated: [] }
 };

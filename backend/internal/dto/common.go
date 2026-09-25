@@ -26,6 +26,10 @@ type TransitionRequest struct {
 	Status          string `json:"status" binding:"required,max=40"`
 	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
 	Reason          string `json:"reason" binding:"required,min=3,max=500"`
+	// ReceivedWeightKg 仅对联单签收/现场驳回有效：签收必须提供正数实收重量。
+	ReceivedWeightKg *float64 `json:"receivedWeightKg"`
+	// WeightDiffReason 在实收重量超出计划重量 5% 而转驳回时必填。
+	WeightDiffReason string `json:"weightDiffReason" binding:"max=500"`
 }
 
 type AuditSummaryQuery struct {

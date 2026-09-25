@@ -28,10 +28,15 @@ type apiEnvelope struct {
 }
 
 type record struct {
-	ID      uint   `json:"id"`
-	Code    string `json:"code"`
-	Status  string `json:"status"`
-	Version uint   `json:"version"`
+	ID               uint     `json:"id"`
+	Code             string   `json:"code"`
+	Status           string   `json:"status"`
+	Version          uint     `json:"version"`
+	QuantityKg       float64  `json:"quantityKg"`
+	ReceivedWeightKg *float64 `json:"receivedWeightKg"`
+	WeightDiffKg     *float64 `json:"weightDiffKg"`
+	WeightDiffReason string   `json:"weightDiffReason"`
+	ReceivedAt       *string  `json:"receivedAt"`
 }
 
 func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
@@ -112,7 +117,74 @@ func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 	})
 	assertStatus(t, response, http.StatusUnprocessableEntity)
 
-	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "check-create", checkPayload("CC-ROUTER-001", manifest.Code))
+	// 联单发运后签收必须带实收重量；超重 5% 的签收转驳回并要求差异原因。
+	response, body = request(t, engine, http.MethodPost, "/api/manifests", operator, "manifest-create-weigh", manifestPayload("TM-ROUTER-004", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	weighed := decodeRecord(t, body)
+	for _, step := range []struct {
+		status string
+		reqid  string
+	}{{status: "submitted", reqid: "weigh-submit"}, {status: "in_transit", reqid: "weigh-ship"}} {
+		response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", weighed.ID), operator, step.reqid, map[string]any{
+			"status": step.status, "expectedVersion": weighed.Version, "reason": "linked permits checked",
+		})
+		assertStatus(t, response, http.StatusOK)
+		weighed = decodeRecord(t, body)
+	}
+
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", weighed.ID), operator, "receive-without-weight", map[string]any{
+		"status": "received", "expectedVersion": weighed.Version, "reason": "actual weight is mandatory",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", weighed.ID), operator, "receive-overweight-no-reason", map[string]any{
+		"status": "received", "expectedVersion": weighed.Version, "reason": "overweight receipt must be rejected with reason",
+		"receivedWeightKg": 720.0,
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", weighed.ID), operator, "receive-overweight-rejected", map[string]any{
+		"status": "received", "expectedVersion": weighed.Version, "reason": "site weighing exceeds plan",
+		"receivedWeightKg": 720.0, "weightDiffReason": "现场地磅复磅超出计划 5% 以上，车辆暂扣待复核",
+	})
+	assertStatus(t, response, http.StatusOK)
+	weighed = decodeRecord(t, body)
+	if weighed.Status != "rejected" || weighed.ReceivedWeightKg == nil || *weighed.ReceivedWeightKg != 720.0 ||
+		weighed.WeightDiffKg == nil || *weighed.WeightDiffKg != 39.5 || weighed.WeightDiffReason == "" || weighed.ReceivedAt == nil {
+		t.Fatalf("overweight receipt should be rejected with captured weight/diff/reason: %+v", weighed)
+	}
+
+	// 差异在 5% 以内的正常签收：保存实收重量、差值与签收时间。
+	response, body = request(t, engine, http.MethodPost, "/api/manifests", operator, "manifest-create-receive", manifestPayload("TM-ROUTER-005", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	receivable := decodeRecord(t, body)
+	for _, step := range []struct {
+		status string
+		reqid  string
+	}{{status: "submitted", reqid: "receive-submit"}, {status: "in_transit", reqid: "receive-ship"}} {
+		response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", receivable.ID), operator, step.reqid, map[string]any{
+			"status": step.status, "expectedVersion": receivable.Version, "reason": "linked permits checked",
+		})
+		assertStatus(t, response, http.StatusOK)
+		receivable = decodeRecord(t, body)
+	}
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", receivable.ID), operator, "receive-in-tolerance", map[string]any{
+		"status": "received", "expectedVersion": receivable.Version, "reason": "site weight matches plan",
+		"receivedWeightKg": 685.0,
+	})
+	assertStatus(t, response, http.StatusOK)
+	receivable = decodeRecord(t, body)
+	if receivable.Status != "received" || receivable.ReceivedWeightKg == nil || *receivable.ReceivedWeightKg != 685.0 ||
+		receivable.WeightDiffKg == nil || *receivable.WeightDiffKg != 4.5 || receivable.ReceivedAt == nil {
+		t.Fatalf("receipt should persist actual weight, diff and received time: %+v", receivable)
+	}
+	// 签收为终态，不允许再迁移。
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", receivable.ID), operator, "receive-final", map[string]any{
+		"status": "rejected", "expectedVersion": receivable.Version, "reason": "received manifests are final",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "check-create", checkPayload("CC-ROUTER-001", receivable.Code))
 	assertStatus(t, response, http.StatusCreated)
 	check := decodeRecord(t, body)
 	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", check.ID), operator, "operator-decision", map[string]any{
@@ -127,6 +199,45 @@ func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 	check = decodeRecord(t, body)
 	if check.Status != "pass" || check.Version != 2 {
 		t.Fatalf("review decision was not persisted: %+v", check)
+	}
+
+	// 未签收（在途）联单的核验不能通过。
+	response, body = request(t, engine, http.MethodPost, "/api/manifests", operator, "manifest-create-intransit-check", manifestPayload("TM-ROUTER-006", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	inTransit := decodeRecord(t, body)
+	for _, step := range []struct {
+		status string
+	}{{status: "submitted"}, {status: "in_transit"}} {
+		response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", inTransit.ID), operator, "intransit-step", map[string]any{
+			"status": step.status, "expectedVersion": inTransit.Version, "reason": "moving in transit for check gate",
+		})
+		assertStatus(t, response, http.StatusOK)
+		inTransit = decodeRecord(t, body)
+	}
+	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "check-create-intransit", checkPayload("CC-ROUTER-003", inTransit.Code))
+	assertStatus(t, response, http.StatusCreated)
+	pendingCheck := decodeRecord(t, body)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", pendingCheck.ID), reviewer, "pass-before-receipt", map[string]any{
+		"status": "pass", "expectedVersion": pendingCheck.Version, "reason": "must not pass before manifest receipt",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	// 已驳回联单的核验：通过被拒，只能不通过，不通过后可升级复核。
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", rejectedCheck.ID), reviewer, "rejected-check-pass", map[string]any{
+		"status": "pass", "expectedVersion": rejectedCheck.Version, "reason": "rejected manifest cannot pass",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", rejectedCheck.ID), reviewer, "rejected-check-fail", map[string]any{
+		"status": "fail", "expectedVersion": rejectedCheck.Version, "reason": "manifest rejected for overweight receipt",
+	})
+	assertStatus(t, response, http.StatusOK)
+	rejectedCheck = decodeRecord(t, body)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", rejectedCheck.ID), reviewer, "rejected-check-escalate", map[string]any{
+		"status": "escalated", "expectedVersion": rejectedCheck.Version, "reason": "escalate rejected manifest for senior review",
+	})
+	assertStatus(t, response, http.StatusOK)
+	if decodeRecord(t, body).Status != "escalated" {
+		t.Fatalf("failed check on rejected manifest should be escalatable")
 	}
 
 	response, body = request(t, engine, http.MethodGet, "/api/audits?page=1&pageSize=100", reviewer, "audit-read", nil)

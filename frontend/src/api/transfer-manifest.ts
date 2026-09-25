@@ -8,8 +8,8 @@ export async function listTransferManifest(page = 1, pageSize = 20, search = '')
 export async function createTransferManifest(input: Partial<DomainRecord>) {
   return request<DomainRecord>('/manifests', { method: 'POST', body: JSON.stringify(input) });
 }
-export async function transitionTransferManifest(id: number, status: string, expectedVersion: number, reason: string) {
+export async function transitionTransferManifest(id: number, status: string, expectedVersion: number, reason: string, extra: { receivedWeightKg?: number | null; weightDiffReason?: string } = {}) {
   return request<DomainRecord>(`/manifests/${id}/transition`, {
-    method: 'POST', body: JSON.stringify({ status, expectedVersion, reason }),
+    method: 'POST', body: JSON.stringify({ status, expectedVersion, reason, receivedWeightKg: extra.receivedWeightKg ?? null, weightDiffReason: extra.weightDiffReason || '' }),
   });
 }

@@ -41,6 +41,8 @@ docker compose down -v --remove-orphans
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC，后端 middleware、前端守卫、导航与按钮同步生效。
 - 联单提交和发运前会重新核验产废许可为 `active`、承运资质为 `verified`，且双方证照仍在有效期内。
 - 联单只允许 `draft → submitted → in_transit → received`，`submitted/in_transit` 可转 `rejected`；核验决定不可回退，失败仅可升级复核。
+- 签收必须录入现场实收重量：同一事务保存实收重量、与计划重量的差值和签收时间；`received` 为终态，重量数据不可改写。实收重量超出计划 5% 时签收自动转为 `rejected`，且必须填写差异原因。
+- 合规核验只有在联单 `received` 后才可通过；联单已驳回的核验只能不通过，随后仅可升级复核。列表直接展示实收重量、差异与差异原因。
 - 已提交联单和已决定核验不可编辑或删除；写入使用乐观锁。
 - 建档、许可/证据更新、状态变化和删除与审计日志在同一数据库事务中提交，审计保留 actor 与 request ID。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。

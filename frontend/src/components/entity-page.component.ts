@@ -5,6 +5,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatInputModule } from '@angular/material/input';
 import { useAuth } from '../hooks/use-auth';
 import { createPagination } from '../hooks/use-pagination';
+import { request } from '../api/client';
 import type { EntityStore } from '../stores/factory';
 import type { DomainRecord, EntityConfig } from '../types/domain';
 import { TRANSITIONS } from '../types/status';
@@ -48,7 +49,14 @@ import { StatusBadgeComponent } from './common/status-badge.component';
               <td><strong>{{ item.code }}</strong></td>
               <td>{{ item.name }}<small>{{ item.facility }}</small></td>
               <td><app-status-badge [status]="item.status" /></td>
-              <td><span class="domain-detail">{{ domainDetail(item) }}</span><small>{{ item.evidence }}</small></td>
+              <td><span class="domain-detail">{{ domainDetail(item) }}</span><small>{{ item.evidence }}</small>
+                <small class="receipt-line" *ngIf="isManifest() && item.receivedWeightKg != null">实收 {{ item.receivedWeightKg }} kg · 差异 {{ signedDiff(item.weightDiffKg) }} kg · 签收时间 {{ formatDate(item.receivedAt) }}</small>
+                <small class="diff-reason" *ngIf="isManifest() && item.weightDiffReason">差异原因：{{ item.weightDiffReason }}</small>
+                <ng-container *ngIf="isCheck() && linkedManifest(item) as manifest">
+                  <small class="receipt-line" *ngIf="manifest.receivedWeightKg != null">联单实收 {{ manifest.receivedWeightKg }} kg · 差异 {{ signedDiff(manifest.weightDiffKg) }} kg</small>
+                  <small class="diff-reason" *ngIf="manifest.weightDiffReason">差异原因：{{ manifest.weightDiffReason }}</small>
+                </ng-container>
+              </td>
               <td><span [class]="'risk risk--' + item.riskLevel">{{ item.riskLevel }}</span></td>
               <td>{{ item.owner }}</td>
               <td>{{ item.metricValue }} {{ item.metricUnit }}</td>
@@ -56,8 +64,9 @@ import { StatusBadgeComponent } from './common/status-badge.component';
               <td class="actions">
                 <ng-container *ngIf="canTransition()">
                   <button *ngFor="let target of transitions(item)" class="table-action" (click)="openTransition(item, target)">{{ transitionLabel(target) }}</button>
+                  <small *ngIf="transitions(item).length === 0 && transitionHint(item)" class="hint-line">{{ transitionHint(item) }}</small>
                 </ng-container>
-                <span *ngIf="!canTransition() || transitions(item).length === 0" class="muted">{{ auth.hasMinimumRole('operator') ? '流程结束' : '只读' }}</span>
+                <span *ngIf="!canTransition() || (transitions(item).length === 0 && !transitionHint(item))" class="muted">{{ auth.hasMinimumRole('operator') ? '流程结束' : '只读' }}</span>
               </td>
             </tr>
             <tr *ngIf="!state.items.length && !state.loading"><td colspan="9" class="empty">暂无记录</td></tr>
@@ -75,9 +84,21 @@ import { StatusBadgeComponent } from './common/status-badge.component';
       <app-confirm-dialog [open]="showCreate" [title]="'新增' + config.label" (cancel)="closeCreate()" (confirm)="createDemo()">
         <p>确认创建一条包含责任人、业务关联、风险和证据信息的记录。</p>
       </app-confirm-dialog>
-      <app-confirm-dialog [open]="!!pending" title="确认状态迁移" (cancel)="closeTransition()" (confirm)="confirmTransition()">
-        <p>状态迁移会校验关联资质，并与请求 ID 审计记录在同一事务中保存。</p>
-        <strong>{{ pending?.item?.status }} → {{ pending?.status }}</strong>
+      <app-confirm-dialog [open]="!!pending" [title]="transitionDialogTitle()" [confirmDisabled]="!transitionPayloadValid()" (cancel)="closeTransition()" (confirm)="confirmTransition()">
+        <ng-container *ngIf="isManifest() && pending?.status === 'received'">
+          <p>请录入现场过磅的实收重量。计划重量 <strong>{{ pending.item.quantityKg }} kg</strong>，超出 5%（{{ overWeightThreshold().toFixed(2) }} kg）将自动转驳回，并必须填写差异原因。</p>
+          <label class="field-label">实收重量（kg，必填）
+            <input type="number" min="0" step="0.001" class="field-input" [(ngModel)]="receivedWeightInput" placeholder="例如 685.0" />
+          </label>
+          <p class="hint" *ngIf="parsedReceivedWeight() !== null">当前差异：<strong [class.overweight]="isOverweight()">{{ signedDiff(parsedReceivedWeight()! - plannedWeight()) }} kg</strong><span *ngIf="isOverweight()">（已超出 5%，提交后联单将被驳回）</span></p>
+          <label class="field-label" *ngIf="isOverweight()">差异原因（必填）
+            <textarea rows="2" class="field-input" [(ngModel)]="weightDiffReasonInput" maxlength="500" placeholder="说明现场实收与计划重量产生差异的原因"></textarea>
+          </label>
+        </ng-container>
+        <ng-container *ngIf="!isManifest() || pending?.status !== 'received'">
+          <p>{{ transitionNotice() }}</p>
+          <strong>{{ pending?.item?.status }} → {{ pending?.status }}</strong>
+        </ng-container>
       </app-confirm-dialog>
     </main>
   `
@@ -91,6 +112,9 @@ export class EntityPageComponent implements OnInit {
   search = '';
   showCreate = false;
   pending: { item: DomainRecord; status: string } | null = null;
+  receivedWeightInput = '';
+  weightDiffReasonInput = '';
+  manifestByCode: Record<string, DomainRecord> = {};
 
   constructor(private readonly changeDetector: ChangeDetectorRef) {}
 
@@ -99,8 +123,30 @@ export class EntityPageComponent implements OnInit {
   highRisk(items: DomainRecord[]): number { return items.filter((item) => ['high', 'critical'].includes(item.riskLevel)).length; }
   statusCount(items: DomainRecord[]): number { return new Set(items.map((item) => item.status)).size; }
   isLicensePage(): boolean { return this.config.key === 'wasteGenerator' || this.config.key === 'carrierProfile'; }
+  isManifest(): boolean { return this.config.key === 'transferManifest'; }
+  isCheck(): boolean { return this.config.key === 'complianceCheck'; }
   canTransition(): boolean { return this.auth.hasMinimumRole(this.config.transitionRole); }
-  transitions(item: DomainRecord): readonly string[] { return TRANSITIONS[this.config.key]?.[item.status] ?? []; }
+  transitions(item: DomainRecord): readonly string[] {
+    const targets = TRANSITIONS[this.config.key]?.[item.status] ?? [];
+    // 合规核验的“通过”仅在关联联单已签收后可用；已驳回联单只能不通过或升级复核。
+    if (this.isCheck()) {
+      const manifestStatus = this.manifestByCode[item.manifestCode || '']?.status ?? '';
+      return targets.filter((target) => target !== 'pass' || manifestStatus === 'received');
+    }
+    return targets;
+  }
+  transitionHint(item: DomainRecord): string {
+    if (this.isCheck() && item.status === 'pending') {
+      const manifestStatus = this.manifestByCode[item.manifestCode || '']?.status ?? '';
+      if (manifestStatus === 'rejected') return '联单已驳回：只能不通过，之后可升级复核';
+      if (manifestStatus !== 'received') return '联单签收后才可通过';
+    }
+    return '';
+  }
+
+  linkedManifest(item: DomainRecord): DomainRecord | undefined {
+    return this.isCheck() ? this.manifestByCode[item.manifestCode || ''] : undefined;
+  }
 
   pageDescription(): string {
     const descriptions: Record<string, string> = {
@@ -115,8 +161,46 @@ export class EntityPageComponent implements OnInit {
   domainDetail(item: DomainRecord): string {
     if (this.config.key === 'wasteGenerator') return `${item.permitNumber || '-'} · ${item.wasteCategories || '-'}`;
     if (this.config.key === 'carrierProfile') return `${item.licenseNumber || '-'} · ${item.vehicleCount || 0} 辆`;
-    if (this.config.key === 'transferManifest') return `${item.generatorCode} → ${item.carrierCode} · ${item.quantityKg} kg`;
+    if (this.config.key === 'transferManifest') return `${item.generatorCode} → ${item.carrierCode} · 计划 ${item.quantityKg} kg`;
     return `${item.manifestCode || '-'} · ${item.decisionBasis || '待决定'}`;
+  }
+
+  plannedWeight(): number { return Number(this.pending?.item.quantityKg ?? 0); }
+
+  parsedReceivedWeight(): number | null {
+    if (!this.receivedWeightInput.trim()) return null;
+    const value = Number(this.receivedWeightInput);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  overWeightThreshold(): number { return this.plannedWeight() * 1.05; }
+
+  isOverweight(): boolean {
+    const actual = this.parsedReceivedWeight();
+    return actual !== null && actual - this.plannedWeight() > this.plannedWeight() * 0.05;
+  }
+
+  signedDiff(value?: number | null): string {
+    if (value === null || value === undefined || Number.isNaN(value)) return '-';
+    return value > 0 ? `+${value.toFixed(3)}` : value.toFixed(3);
+  }
+
+  transitionPayloadValid(): boolean {
+    if (!this.pending) return false;
+    if (this.isManifest() && this.pending.status === 'received') {
+      return this.parsedReceivedWeight() !== null && (!this.isOverweight() || this.weightDiffReasonInput.trim().length >= 3);
+    }
+    return true;
+  }
+
+  transitionDialogTitle(): string {
+    if (this.isManifest() && this.pending?.status === 'received') return '现场签收（录入实收重量）';
+    return '确认状态迁移';
+  }
+
+  transitionNotice(): string {
+    if (this.config.key === 'complianceCheck') return '核验决定不可回退：联单签收后才可通过；联单已驳回时只能不通过，不通过后可升级复核。';
+    return '状态迁移会校验关联资质，并与请求 ID 审计记录在同一事务中保存。';
   }
 
   transitionLabel(status: string): string {
@@ -130,8 +214,18 @@ export class EntityPageComponent implements OnInit {
   async nextPage(): Promise<void> { this.pagination.next(); await this.load(); }
   openCreate(): void { this.showCreate = true; this.changeDetector.detectChanges(); }
   closeCreate(): void { this.showCreate = false; this.changeDetector.detectChanges(); }
-  openTransition(item: DomainRecord, status: string): void { this.pending = { item, status }; this.changeDetector.detectChanges(); }
-  closeTransition(): void { this.pending = null; this.changeDetector.detectChanges(); }
+  openTransition(item: DomainRecord, status: string): void {
+    this.pending = { item, status };
+    this.receivedWeightInput = '';
+    this.weightDiffReasonInput = '';
+    this.changeDetector.detectChanges();
+  }
+  closeTransition(): void {
+    this.pending = null;
+    this.receivedWeightInput = '';
+    this.weightDiffReasonInput = '';
+    this.changeDetector.detectChanges();
+  }
 
   async createDemo(): Promise<void> {
     const now = Date.now();
@@ -158,16 +252,35 @@ export class EntityPageComponent implements OnInit {
   }
 
   async confirmTransition(): Promise<void> {
-    if (!this.pending) return;
+    if (!this.pending || !this.transitionPayloadValid()) return;
     try {
-      await this.store.transition(this.config.path, this.pending.item, this.pending.status);
+      if (this.isManifest() && this.pending.status === 'received') {
+        await this.store.transition(this.config.path, this.pending.item, this.pending.status, {
+          receivedWeightKg: this.parsedReceivedWeight(),
+          weightDiffReason: this.isOverweight() ? this.weightDiffReasonInput.trim() : '',
+        });
+      } else {
+        await this.store.transition(this.config.path, this.pending.item, this.pending.status);
+      }
       this.pending = null;
+      this.receivedWeightInput = '';
+      this.weightDiffReasonInput = '';
     } catch { /* Store exposes the request error in its observable state. */ }
     finally { this.changeDetector.detectChanges(); }
   }
 
   private async load(): Promise<void> {
     await this.store.load(this.config.path, this.search, this.pagination.page(), this.pagination.pageSize());
+    if (this.isCheck()) {
+      await this.loadManifestStatuses();
+    }
     this.changeDetector.detectChanges();
+  }
+
+  private async loadManifestStatuses(): Promise<void> {
+    try {
+      const result = await request<DomainRecord[]>('/manifests?page=1&pageSize=100');
+      this.manifestByCode = Object.fromEntries(result.data.map((item) => [item.code, item]));
+    } catch { /* 联单状态缺失时按未签收处理，后端仍会执行闸门校验。 */ }
   }
 }

@@ -113,8 +113,8 @@ func (s *complianceCheckService) Transition(ctx context.Context, id uint, input 
 	if err != nil {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: linked manifest is unavailable", ErrInvalidInput)
 	}
-	if target == string(constants.CheckStatePass) && manifest.Status != string(constants.ManifestStateSubmitted) && manifest.Status != string(constants.ManifestStateInTransit) && manifest.Status != string(constants.ManifestStateReceived) {
-		return model.ComplianceCheck{}, fmt.Errorf("%w: only an active or received manifest can pass compliance review", ErrInvalidInput)
+	if target == string(constants.CheckStatePass) && manifest.Status != string(constants.ManifestStateReceived) {
+		return model.ComplianceCheck{}, fmt.Errorf("%w: compliance can only pass after the manifest has been signed for receipt", ErrInvalidInput)
 	}
 	if strings.TrimSpace(current.Evidence) == "" || strings.TrimSpace(input.Reason) == "" {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: decision evidence and reason are required", ErrInvalidInput)

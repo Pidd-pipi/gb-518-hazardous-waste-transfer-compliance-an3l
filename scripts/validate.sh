@@ -92,6 +92,12 @@ blocked_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/a
   -d '{"status":"submitted","expectedVersion":1,"reason":"unverified carrier must block"}')
 [ "$blocked_status" = "422" ]
 
+intransit=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"in_transit","expectedVersion":2,"reason":"carrier departed with sealed load"}')
+printf '%s' "$intransit" | jq -e '.data.status == "in_transit" and .data.version == 3' >/dev/null
+
+# 核验在联单签收前建立，此时通过必须被闸门拒绝。
 check_code="CC-VALIDATE-$stamp"
 check_payload=$(jq -nc --arg code "$check_code" --arg manifest "$manifest_code" --arg now "$now" '{
   code:$code,name:"空卷验收核验",description:"Compose compliance decision validation",manifestCode:$manifest,
@@ -109,10 +115,63 @@ operator_decision=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_ur
   -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"operator cannot decide\"}")
 [ "$operator_decision" = "403" ]
 
+pass_before_receipt=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"must not pass before receipt\"}")
+[ "$pass_before_receipt" = "422" ]
+
+# 签收必须带实收重量；计划 680.5 kg，5% 上限为 714.525 kg。
+receive_no_weight=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"received","expectedVersion":3,"reason":"actual weight is mandatory"}')
+[ "$receive_no_weight" = "422" ]
+
+receive_overweight_no_reason=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"received","expectedVersion":3,"reason":"overweight requires reason","receivedWeightKg":720}')
+[ "$receive_overweight_no_reason" = "422" ]
+
+received=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-receive' -H 'Content-Type: application/json' \
+  -d '{"status":"received","expectedVersion":3,"reason":"site weighing within tolerance","receivedWeightKg":685}')
+printf '%s' "$received" | jq -e '.data.status == "received" and .data.version == 4 and .data.receivedWeightKg == 685 and .data.weightDiffKg == 4.5 and (.data.receivedAt | type == "string")' >/dev/null
+
 decision=$(curl -fsS -X POST "$backend_url/api/checks/$check_id/transition" \
   -H "Authorization: Bearer $reviewer_token" -H 'X-Request-ID: validation-reviewer-decision' -H 'Content-Type: application/json' \
   -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"all evidence groups verified\"}")
 printf '%s' "$decision" | jq -e '.data.status == "pass" and .data.version == 2 and .data.decisionBasis == "all evidence groups verified"' >/dev/null
+
+# 超重签收：自动转驳回，保存实收重量、差值与差异原因；核验只能不通过并升级复核。
+overweight_code="TM-OVERWEIGHT-$stamp"
+overweight_payload=$(printf '%s' "$manifest_payload" | jq --arg code "$overweight_code" '.code=$code | .quantityKg=680.5')
+overweight=$(curl -fsS -X POST "$backend_url/api/manifests" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$overweight_payload")
+overweight_id=$(printf '%s' "$overweight" | jq -er '.data.id')
+for step_status in submitted in_transit; do
+  overweight=$(curl -fsS -X POST "$backend_url/api/manifests/$overweight_id/transition" \
+    -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg status "$step_status" --argjson version "$(printf '%s' "$overweight" | jq -er '.data.version')" '{status:$status,expectedVersion:$version,reason:"move overweight manifest forward"}')")
+done
+overweight_version=$(printf '%s' "$overweight" | jq -er '.data.version')
+auto_rejected=$(curl -fsS -X POST "$backend_url/api/manifests/$overweight_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d "{\"status\":\"received\",\"expectedVersion\":$overweight_version,\"reason\":\"site weighing exceeds plan\",\"receivedWeightKg\":720,\"weightDiffReason\":\"桶底积液未沥净，复磅超出计划 5%，车辆暂扣待复核\"}")
+printf '%s' "$auto_rejected" | jq -e '.data.status == "rejected" and .data.receivedWeightKg == 720 and .data.weightDiffKg == 39.5 and (.data.weightDiffReason | length > 0) and (.data.receivedAt | type == "string")' >/dev/null
+
+rejected_check_payload=$(printf '%s' "$check_payload" | jq --arg code "CC-REJECTED-$stamp" --arg manifest "$overweight_code" '.code=$code | .manifestCode=$manifest')
+rejected_check=$(curl -fsS -X POST "$backend_url/api/checks" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$rejected_check_payload")
+rejected_check_id=$(printf '%s' "$rejected_check" | jq -er '.data.id')
+rejected_pass=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$rejected_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"pass","expectedVersion":1,"reason":"rejected manifest cannot pass"}')
+[ "$rejected_pass" = "422" ]
+rejected_fail=$(curl -fsS -X POST "$backend_url/api/checks/$rejected_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"fail","expectedVersion":1,"reason":"manifest rejected for overweight receipt"}')
+printf '%s' "$rejected_fail" | jq -e '.data.status == "fail" and .data.version == 2' >/dev/null
+escalated=$(curl -fsS -X POST "$backend_url/api/checks/$rejected_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"escalated","expectedVersion":2,"reason":"escalate rejected manifest for senior review"}')
+printf '%s' "$escalated" | jq -e '.data.status == "escalated"' >/dev/null
 
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "$backend_url/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]

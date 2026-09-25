@@ -110,6 +110,10 @@ func (s *transferManifestService) Update(ctx context.Context, id uint, input dto
 	return s.repository.Get(ctx, id)
 }
 
+// ReceivedWeightTolerance 是计划重量允许的现场偏差上限（5%）。超过上限的签收
+// 不允许直接完成，必须带差异原因转为驳回。
+const ReceivedWeightTolerance = 0.05
+
 func (s *transferManifestService) Transition(ctx context.Context, id uint, input dto.TransitionRequest, actor, requestID string) (model.TransferManifest, error) {
 	current, err := s.repository.Get(ctx, id)
 	if err != nil {
@@ -124,14 +128,74 @@ func (s *transferManifestService) Transition(ctx context.Context, id uint, input
 			return model.TransferManifest{}, err
 		}
 	}
+
 	before := current.Status
+	detail := strings.TrimSpace(input.Reason)
+
+	if target == "received" || (target == "rejected" && current.Status == "in_transit") {
+		receivedWeight, diff, overweight, err := validateReceivedWeight(current.QuantityKg, input.ReceivedWeightKg, target == "received")
+		if err != nil {
+			return model.TransferManifest{}, err
+		}
+		diffReason := strings.TrimSpace(input.WeightDiffReason)
+		if target == "received" && overweight {
+			// 超出计划重量 5%：签收不能完成，转驳回并必须填写差异原因。
+			if diffReason == "" {
+				return model.TransferManifest{}, fmt.Errorf("%w: received weight exceeds planned weight by %.0f%%; manifest must be rejected with a difference reason", ErrInvalidInput, ReceivedWeightTolerance*100)
+			}
+			target = "rejected"
+			applyReceivedWeight(&current, receivedWeight, diff, diffReason)
+			detail = fmt.Sprintf("received %.3f kg exceeds planned %.3f kg by more than %.0f%%, rejected: %s", receivedWeight, current.QuantityKg, ReceivedWeightTolerance*100, diffReason)
+		} else if receivedWeight > 0 {
+			applyReceivedWeight(&current, receivedWeight, diff, diffReason)
+			if target == "rejected" {
+				detail = fmt.Sprintf("rejected at site after weighing %.3f kg (diff %+.3f kg): %s", receivedWeight, diff, joinReason(detail, diffReason))
+			} else {
+				detail = fmt.Sprintf("received %.3f kg (planned %.3f kg, diff %+.3f kg): %s", receivedWeight, current.QuantityKg, diff, detail)
+			}
+		}
+	}
+
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "TransferManifest", before, target, input.Reason)); err != nil {
+	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "TransferManifest", before, target, detail)); err != nil {
 		return model.TransferManifest{}, fmt.Errorf("transition 转运清单: %w", err)
 	}
 	return s.repository.Get(ctx, id)
+}
+
+// validateReceivedWeight 校验签收/现场称重驳回携带的实收重量，返回实收值、与计划
+// 的差值（实收-计划）以及是否超出 5% 容差。
+func validateReceivedWeight(planned float64, received *float64, required bool) (float64, float64, bool, error) {
+	if received == nil {
+		if required {
+			return 0, 0, false, fmt.Errorf("%w: received weight is required before a manifest can be signed for receipt", ErrInvalidInput)
+		}
+		return 0, 0, false, nil
+	}
+	if *received <= 0 {
+		return 0, 0, false, fmt.Errorf("%w: received weight must be a positive value", ErrInvalidInput)
+	}
+	diff := *received - planned
+	overweight := diff > planned*ReceivedWeightTolerance
+	return *received, diff, overweight, nil
+}
+
+// applyReceivedWeight 在同一时间点写入实收重量、与计划的差值、差异原因和签收时间。
+func applyReceivedWeight(manifest *model.TransferManifest, receivedWeight, diff float64, diffReason string) {
+	receivedAt := time.Now().UTC()
+	manifest.ReceivedWeightKg = &receivedWeight
+	manifest.WeightDiffKg = &diff
+	manifest.WeightDiffReason = diffReason
+	manifest.ReceivedAt = &receivedAt
+}
+
+func joinReason(reason, diffReason string) string {
+	if diffReason == "" {
+		return reason
+	}
+	return reason + " | difference reason: " + diffReason
 }
 
 func (s *transferManifestService) Delete(ctx context.Context, id uint, actor, requestID string) error {
