@@ -21,6 +21,14 @@ type TransferManifest struct {
 	EffectiveAt   time.Time `json:"effectiveAt"`
 	Evidence      string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode   string    `json:"relatedCode" gorm:"size:64;index"`
+	// ReceivedWeightKg is the measured weight at site acceptance. It stays nil
+	// until 签收 and is immutable afterwards, so plans and actuals never merge.
+	ReceivedWeightKg *float64   `json:"receivedWeightKg"`
+	WeightVarianceKg *float64   `json:"weightVarianceKg"`
+	ReceivedAt       *time.Time `json:"receivedAt"`
+	// VarianceReason explains the difference against QuantityKg and is mandatory
+	// whenever the received weight exceeds the plan by more than the threshold.
+	VarianceReason string `json:"varianceReason" gorm:"size:500"`
 }
 
 func (item *TransferManifest) GetBase() *BaseModel { return &item.BaseModel }

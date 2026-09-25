@@ -15,6 +15,6 @@ export const ENTITY_CONFIGS: readonly EntityConfig[] = [
 export const TRANSITIONS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
   wasteGenerator: { active: ['restricted', 'suspended', 'expired'], restricted: ['active', 'suspended', 'expired'], suspended: ['active', 'expired'], expired: [] },
   carrierProfile: { pending: ['verified', 'restricted', 'expired'], verified: ['restricted', 'expired'], restricted: ['pending', 'expired'], expired: [] },
-  transferManifest: { draft: ['submitted'], submitted: ['in_transit', 'rejected'], in_transit: ['received', 'rejected'], received: [], rejected: [] },
+  transferManifest: { draft: ['submitted'], submitted: ['in_transit', 'rejected'], in_transit: ['rejected'], received: [], rejected: [] },
   complianceCheck: { pending: ['pass', 'fail', 'escalated'], pass: [], fail: ['escalated'], escalated: [] }
 };

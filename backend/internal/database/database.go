@@ -188,6 +188,11 @@ func seedTransferManifest(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	receivedAt := now.Add(-2 * time.Hour)
+	tm003Weight := 418.5
+	tm003Variance := tm003Weight - 420
+	tm004Weight := 905.0
+	tm004Variance := tm004Weight - 850
 	items := []model.TransferManifest{
 
 		{BaseModel: model.BaseModel{Code: "TM-001", Name: "转运清单示例一", Status: "draft", Version: 1,
@@ -202,11 +207,21 @@ func seedTransferManifest(ctx context.Context, db *gorm.DB) error {
 			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
 			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-02"},
 
-		{BaseModel: model.BaseModel{Code: "TM-003", Name: "转运清单示例三", Status: "in_transit", Version: 1,
+		{BaseModel: model.BaseModel{Code: "TM-003", Name: "转运清单示例三", Status: "received", Version: 2,
 			Description: "用于启动验证和主要流程演示的转运清单记录"}, GeneratorCode: "WG-001", CarrierCode: "CP-002", WasteCode: "HW49-900-041-49", QuantityKg: 420, Destination: "安全填埋中心 C",
 			Facility: "危险废物转运合规核验区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03"},
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03",
+			ReceivedWeightKg: &tm003Weight, WeightVarianceKg: &tm003Variance, ReceivedAt: &receivedAt,
+			VarianceReason: "现场过磅 418.5kg，与计划偏差在 5% 容差内"},
+
+		{BaseModel: model.BaseModel{Code: "TM-004", Name: "转运清单示例四", Status: "rejected", Version: 2,
+			Description: "用于启动验证和主要流程演示的转运清单记录"}, GeneratorCode: "WG-001", CarrierCode: "CP-002", WasteCode: "HW08-900-249-08", QuantityKg: 850, Destination: "资源化利用中心 B",
+			Facility: "危险废物转运合规核验区域4", Owner: "安全主管组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 40.0, MetricUnit: "score",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-04",
+			ReceivedWeightKg: &tm004Weight, WeightVarianceKg: &tm004Variance, ReceivedAt: &receivedAt,
+			VarianceReason: "实收 905kg 超出计划 5%，疑似混入 HW17 污泥，待升级复核"},
 	}
 	return db.WithContext(ctx).Create(&items).Error
 }
@@ -236,6 +251,12 @@ func seedComplianceCheck(ctx context.Context, db *gorm.DB) error {
 			Facility: "危险废物转运合规核验区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03"},
+
+		{BaseModel: model.BaseModel{Code: "CC-004", Name: "合规核验示例四", Status: "pending", Version: 1,
+			Description: "用于启动验证和主要流程演示的合规核验记录"}, ManifestCode: "TM-004", Checklist: "产废许可、承运资质、联单数量、实收差异、处置去向", DecisionBasis: "",
+			Facility: "危险废物转运合规核验区域4", Owner: "质量复核组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 40.0, MetricUnit: "score",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-04"},
 	}
 	return db.WithContext(ctx).Create(&items).Error
 }

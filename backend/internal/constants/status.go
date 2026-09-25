@@ -43,17 +43,24 @@ var CarrierProfileTransitions = map[string]map[string]bool{
 var TransferManifestTransitions = map[string]map[string]bool{
 	"draft":      {"submitted": true},
 	"submitted":  {"in_transit": true, "rejected": true},
-	"in_transit": {"received": true, "rejected": true},
-	"received":   {},
-	"rejected":   {},
+	"in_transit": {"rejected": true},
+	// 签收 (in_transit -> received) is not a bare transition: it goes through
+	// POST /manifests/:id/receive with the measured weight. Receipt over the
+	// allowed tolerance lands in rejected instead. Both states are terminal.
+	"received": {},
+	"rejected": {},
 }
 
 var ComplianceCheckTransitions = map[string]map[string]bool{
-	"pending":   {"pass": true, "fail": true},
+	"pending":   {"pass": true, "fail": true, "escalated": true},
 	"pass":      {},
 	"fail":      {"escalated": true},
 	"escalated": {},
 }
+
+// ManifestWeightTolerance caps how far the received weight may exceed the
+// planned QuantityKg. Strictly above 5% turns 签收 into 驳回.
+const ManifestWeightTolerance = 0.05
 
 func CanTransition(graph map[string]map[string]bool, from, to string) bool {
 	targets, exists := graph[from]

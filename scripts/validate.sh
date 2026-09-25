@@ -83,6 +83,11 @@ stale_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api
   -d '{"status":"in_transit","expectedVersion":1,"reason":"stale version must conflict"}')
 [ "$stale_status" = "409" ]
 
+shipped=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-ship' -H 'Content-Type: application/json' \
+  -d '{"status":"in_transit","expectedVersion":2,"reason":"carrier departed with sealed load"}')
+printf '%s' "$shipped" | jq -e '.data.status == "in_transit" and .data.version == 3' >/dev/null
+
 blocked_code="TM-BLOCKED-$stamp"
 blocked_payload=$(printf '%s' "$manifest_payload" | jq --arg code "$blocked_code" '.code=$code | .carrierCode="CP-001"')
 blocked=$(curl -fsS -X POST "$backend_url/api/manifests" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$blocked_payload")
@@ -109,15 +114,64 @@ operator_decision=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_ur
   -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"operator cannot decide\"}")
 [ "$operator_decision" = "403" ]
 
+early_decision=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"manifest not signed yet\"}")
+[ "$early_decision" = "422" ]
+
+receive_no_weight=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/receive" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":3}')
+[ "$receive_no_weight" = "400" ]
+
+received=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/receive" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-receive' -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":3,"receivedWeightKg":670,"varianceReason":"现场过磅，少量沾附损耗"}')
+printf '%s' "$received" | jq -e '.data.status == "received" and .data.receivedWeightKg == 670 and .data.weightVarianceKg == -10.5 and (.data.receivedAt | length > 0)' >/dev/null
+
+receive_again=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/receive" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":4,"receivedWeightKg":671}')
+[ "$receive_again" = "422" ]
+
 decision=$(curl -fsS -X POST "$backend_url/api/checks/$check_id/transition" \
   -H "Authorization: Bearer $reviewer_token" -H 'X-Request-ID: validation-reviewer-decision' -H 'Content-Type: application/json' \
   -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"all evidence groups verified\"}")
 printf '%s' "$decision" | jq -e '.data.status == "pass" and .data.version == 2 and .data.decisionBasis == "all evidence groups verified"' >/dev/null
 
+over_code="TM-OVER-$stamp"
+over_payload=$(printf '%s' "$manifest_payload" | jq --arg code "$over_code" '.code=$code')
+over=$(curl -fsS -X POST "$backend_url/api/manifests" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$over_payload")
+over_id=$(printf '%s' "$over" | jq -er '.data.id')
+curl -fsS -X POST "$backend_url/api/manifests/$over_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"submitted","expectedVersion":1,"reason":"linked permits checked"}' >/dev/null
+curl -fsS -X POST "$backend_url/api/manifests/$over_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"in_transit","expectedVersion":2,"reason":"carrier departed"}' >/dev/null
+over_no_reason=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$over_id/receive" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":3,"receivedWeightKg":715}')
+[ "$over_no_reason" = "422" ]
+over_rejected=$(curl -fsS -X POST "$backend_url/api/manifests/$over_id/receive" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-overweight' -H 'Content-Type: application/json' \
+  -d '{"expectedVersion":3,"receivedWeightKg":715,"varianceReason":"实收重量超计划 5%，疑似混入其他批次"}')
+printf '%s' "$over_rejected" | jq -e '.data.status == "rejected" and .data.receivedWeightKg == 715 and .data.weightVarianceKg == 34.5 and (.data.varianceReason | length > 0)' >/dev/null
+
+over_check=$(curl -fsS -X POST "$backend_url/api/checks" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d "$(printf '%s' "$check_payload" | jq --arg code "CC-OVER-$stamp" --arg manifest "$over_code" '.code=$code | .manifestCode=$manifest | .relatedCode=$manifest')")
+over_check_id=$(printf '%s' "$over_check" | jq -er '.data.id')
+over_pass=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$over_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"pass","expectedVersion":1,"reason":"rejected manifest must not pass"}')
+[ "$over_pass" = "422" ]
+escalated=$(curl -fsS -X POST "$backend_url/api/checks/$over_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"escalated","expectedVersion":1,"reason":"weight variance beyond tolerance; escalate for review"}')
+printf '%s' "$escalated" | jq -e '.data.status == "escalated"' >/dev/null
+
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "$backend_url/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]
 audits=$(curl -fsS "$backend_url/api/audits?page=1&pageSize=100" -H "Authorization: Bearer $reviewer_token")
-printf '%s' "$audits" | jq -e '([.data[].requestId]) as $ids | ($ids | index("validation-manifest-submit")) != null and ($ids | index("validation-reviewer-decision")) != null' >/dev/null
+printf '%s' "$audits" | jq -e '([.data[].requestId]) as $ids | ($ids | index("validation-manifest-submit")) != null and ($ids | index("validation-manifest-receive")) != null and ($ids | index("validation-reviewer-decision")) != null' >/dev/null
 curl -fsS "$backend_url/api/audit-summary?windowHours=24" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.total >= 5 and .data.transitions >= 2' >/dev/null
 
 docker compose ps

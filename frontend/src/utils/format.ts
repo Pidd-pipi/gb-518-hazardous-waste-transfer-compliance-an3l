@@ -13,3 +13,9 @@ export function daysUntil(value?: string): number | null {
 	if (!value) return null;
 	return Math.ceil((new Date(value).getTime() - Date.now()) / 86_400_000);
 }
+
+export function formatWeightVariance(value?: number | null): string {
+	if (value === null || value === undefined) return '-';
+	const rounded = Math.round(value * 10) / 10;
+	return `${rounded > 0 ? '+' : ''}${rounded} kg`;
+}

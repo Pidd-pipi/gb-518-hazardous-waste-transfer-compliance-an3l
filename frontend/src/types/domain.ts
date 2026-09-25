@@ -29,6 +29,10 @@ export interface DomainRecord {
 	manifestCode?: string;
 	checklist?: string;
 	decisionBasis?: string;
+	receivedWeightKg?: number | null;
+	weightVarianceKg?: number | null;
+	receivedAt?: string | null;
+	varianceReason?: string;
   createdAt: string;
   updatedAt: string;
 }

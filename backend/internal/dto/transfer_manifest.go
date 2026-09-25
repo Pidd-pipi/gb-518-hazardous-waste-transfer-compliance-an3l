@@ -43,3 +43,12 @@ type UpdateTransferManifest struct {
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
 }
+
+// ReceiveManifest is the dedicated contract for 联单签收. A measured
+// ReceivedWeightKg is mandatory: manifests cannot be signed without an actual
+// weight, and VarianceReason becomes required when the weight exceeds plan.
+type ReceiveManifest struct {
+	ExpectedVersion  uint    `json:"expectedVersion" binding:"required"`
+	ReceivedWeightKg float64 `json:"receivedWeightKg" binding:"required,gt=0"`
+	VarianceReason   string  `json:"varianceReason" binding:"max=500"`
+}

@@ -113,8 +113,20 @@ func (s *complianceCheckService) Transition(ctx context.Context, id uint, input 
 	if err != nil {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: linked manifest is unavailable", ErrInvalidInput)
 	}
-	if target == string(constants.CheckStatePass) && manifest.Status != string(constants.ManifestStateSubmitted) && manifest.Status != string(constants.ManifestStateInTransit) && manifest.Status != string(constants.ManifestStateReceived) {
-		return model.ComplianceCheck{}, fmt.Errorf("%w: only an active or received manifest can pass compliance review", ErrInvalidInput)
+	switch target {
+	case string(constants.CheckStatePass):
+		if manifest.Status != string(constants.ManifestStateReceived) {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: compliance can only pass after the linked manifest is signed for receipt", ErrInvalidInput)
+		}
+	case string(constants.CheckStateFail), string(constants.CheckStateEscalated):
+		// A rejected manifest can never return to compliance; reviewers may
+		// only record a fail outcome or escalate it for further review.
+		if manifest.Status == string(constants.ManifestStateRejected) {
+			break
+		}
+		if target == string(constants.CheckStateEscalated) && current.Status != string(constants.CheckStateFail) {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: escalation from pending is reserved for checks on rejected manifests", ErrInvalidInput)
+		}
 	}
 	if strings.TrimSpace(current.Evidence) == "" || strings.TrimSpace(input.Reason) == "" {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: decision evidence and reason are required", ErrInvalidInput)

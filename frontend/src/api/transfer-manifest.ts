@@ -13,3 +13,8 @@ export async function transitionTransferManifest(id: number, status: string, exp
     method: 'POST', body: JSON.stringify({ status, expectedVersion, reason }),
   });
 }
+export async function receiveTransferManifest(id: number, expectedVersion: number, receivedWeightKg: number, varianceReason: string) {
+  return request<DomainRecord>(`/manifests/${id}/receive`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, receivedWeightKg, varianceReason }),
+  });
+}

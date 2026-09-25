@@ -18,6 +18,7 @@ type TransferManifestService interface {
 	Create(context.Context, dto.CreateTransferManifest, string, string) (model.TransferManifest, error)
 	Update(context.Context, uint, dto.UpdateTransferManifest, string, string) (model.TransferManifest, error)
 	Transition(context.Context, uint, dto.TransitionRequest, string, string) (model.TransferManifest, error)
+	Receive(context.Context, uint, dto.ReceiveManifest, string, string) (model.TransferManifest, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
 }
@@ -130,6 +131,54 @@ func (s *transferManifestService) Transition(ctx context.Context, id uint, input
 	current.UpdatedAt = time.Now().UTC()
 	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "TransferManifest", before, target, input.Reason)); err != nil {
 		return model.TransferManifest{}, fmt.Errorf("transition 转运清单: %w", err)
+	}
+	return s.repository.Get(ctx, id)
+}
+
+// Receive performs 联单签收 with the measured site weight. The actual weight,
+// its variance against the plan and the receipt time are persisted together;
+// once written they are immutable because received/rejected are terminal.
+// When the received weight exceeds the plan by more than
+// constants.ManifestWeightTolerance, the manifest is rejected instead and a
+// variance reason is mandatory.
+func (s *transferManifestService) Receive(ctx context.Context, id uint, input dto.ReceiveManifest, actor, requestID string) (model.TransferManifest, error) {
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.TransferManifest{}, err
+	}
+	if current.Status != string(constants.ManifestStateInTransit) {
+		return model.TransferManifest{}, fmt.Errorf("%w: only in_transit manifests can be signed for receipt", ErrInvalidTransition)
+	}
+	if input.ReceivedWeightKg <= 0 {
+		return model.TransferManifest{}, fmt.Errorf("%w: actual received weight is required to sign the manifest", ErrInvalidInput)
+	}
+	variance := input.ReceivedWeightKg - current.QuantityKg
+	overweight := input.ReceivedWeightKg > current.QuantityKg*(1+constants.ManifestWeightTolerance)
+	reason := strings.TrimSpace(input.VarianceReason)
+	if overweight && reason == "" {
+		return model.TransferManifest{}, fmt.Errorf("%w: received weight exceeds the planned weight by more than %.0f%%; a difference reason is required", ErrInvalidInput, constants.ManifestWeightTolerance*100)
+	}
+	before := current.Status
+	target := string(constants.ManifestStateReceived)
+	detail := "signed manifest receipt with measured weight"
+	if overweight {
+		target = string(constants.ManifestStateRejected)
+		detail = "rejected receipt: measured weight exceeds plan tolerance"
+	}
+	receivedAt := time.Now().UTC()
+	current.ReceivedWeightKg = &input.ReceivedWeightKg
+	current.WeightVarianceKg = &variance
+	current.ReceivedAt = &receivedAt
+	current.VarianceReason = reason
+	current.Status = target
+	current.Version = input.ExpectedVersion + 1
+	current.UpdatedAt = receivedAt
+	auditDetail := detail
+	if reason != "" {
+		auditDetail = detail + ": " + reason
+	}
+	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "receive", "TransferManifest", before, target, auditDetail)); err != nil {
+		return model.TransferManifest{}, fmt.Errorf("receive 转运清单: %w", err)
 	}
 	return s.repository.Get(ctx, id)
 }

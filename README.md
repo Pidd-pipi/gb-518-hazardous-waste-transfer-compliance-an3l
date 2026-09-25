@@ -40,7 +40,8 @@ docker compose down -v --remove-orphans
 
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC，后端 middleware、前端守卫、导航与按钮同步生效。
 - 联单提交和发运前会重新核验产废许可为 `active`、承运资质为 `verified`，且双方证照仍在有效期内。
-- 联单只允许 `draft → submitted → in_transit → received`，`submitted/in_transit` 可转 `rejected`；核验决定不可回退，失败仅可升级复核。
+- 联单只允许 `draft → submitted → in_transit → received`，`submitted/in_transit` 可转 `rejected`；签收走专用 `POST /api/manifests/:id/receive`，必须带实收重量，保存实收重量、与计划的差值和签收时间且不可改写；实收超出计划重量 5% 时自动转 `rejected` 并必须填写差异原因。
+- 核验决定不可回退：`pass` 仅在联单签收后允许，已驳回联单的核验只能 `fail` 或 `escalated` 升级复核。
 - 已提交联单和已决定核验不可编辑或删除；写入使用乐观锁。
 - 建档、许可/证据更新、状态变化和删除与审计日志在同一数据库事务中提交，审计保留 actor 与 request ID。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
@@ -94,7 +95,7 @@ cd ../frontend && npm run typecheck && npm run build
 cd .. && docker compose config --quiet
 ```
 
-也可以从项目根目录执行 `./scripts/validate.sh`。脚本会从空命名卷构建并启动全部服务，验证 RBAC、关联资质阻断、状态跳级阻断、乐观锁、核验决定和 request ID 审计，结束时关闭容器并删除本项目卷。设置 `KEEP_RUNNING=1` 可为内置 Browser 验收保留服务。
+也可以从项目根目录执行 `./scripts/validate.sh`。脚本会从空命名卷构建并启动全部服务，验证 RBAC、关联资质阻断、状态跳级阻断、乐观锁、签收实收重量与超差驳回、核验决定和 request ID 审计，结束时关闭容器并删除本项目卷。设置 `KEEP_RUNNING=1` 可为内置 Browser 验收保留服务。
 
 ## 目录结构
 

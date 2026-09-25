@@ -28,10 +28,14 @@ type apiEnvelope struct {
 }
 
 type record struct {
-	ID      uint   `json:"id"`
-	Code    string `json:"code"`
-	Status  string `json:"status"`
-	Version uint   `json:"version"`
+	ID               uint     `json:"id"`
+	Code             string   `json:"code"`
+	Status           string   `json:"status"`
+	Version          uint     `json:"version"`
+	ReceivedWeightKg *float64 `json:"receivedWeightKg"`
+	WeightVarianceKg *float64 `json:"weightVarianceKg"`
+	ReceivedAt       *string  `json:"receivedAt"`
+	VarianceReason   string   `json:"varianceReason"`
 }
 
 func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
@@ -111,7 +115,13 @@ func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 		"status": "pass", "expectedVersion": rejectedCheck.Version, "reason": "a rejected manifest must not pass",
 	})
 	assertStatus(t, response, http.StatusUnprocessableEntity)
+	// A check on a rejected manifest may only fail or be escalated for review.
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", rejectedCheck.ID), reviewer, "rejected-manifest-escalate", map[string]any{
+		"status": "escalated", "expectedVersion": rejectedCheck.Version, "reason": "rejected before shipment; escalate for review",
+	})
+	assertStatus(t, response, http.StatusOK)
 
+	// Compliance cannot pass while the manifest is still merely submitted.
 	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "check-create", checkPayload("CC-ROUTER-001", manifest.Code))
 	assertStatus(t, response, http.StatusCreated)
 	check := decodeRecord(t, body)
@@ -119,9 +129,52 @@ func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 		"status": "pass", "expectedVersion": check.Version, "reason": "operator must not decide",
 	})
 	assertStatus(t, response, http.StatusForbidden)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", check.ID), reviewer, "reviewer-decision-early", map[string]any{
+		"status": "pass", "expectedVersion": check.Version, "reason": "manifest not signed yet",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
 
+	// Move the manifest in transit and exercise the receipt workflow.
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "manifest-ship", map[string]any{
+		"status": "in_transit", "expectedVersion": manifest.Version, "reason": "carrier accepted the sealed load",
+	})
+	assertStatus(t, response, http.StatusOK)
+	manifest = decodeRecord(t, body)
+
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "receive-via-transition", map[string]any{
+		"status": "received", "expectedVersion": manifest.Version, "reason": "receipt bypass without weight",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", manifest.ID), viewer, "receive-viewer-blocked", map[string]any{
+		"expectedVersion": manifest.Version, "receivedWeightKg": 670,
+	})
+	assertStatus(t, response, http.StatusForbidden)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", manifest.ID), operator, "receive-without-weight", map[string]any{
+		"expectedVersion": manifest.Version,
+	})
+	assertStatus(t, response, http.StatusBadRequest)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", manifest.ID), operator, "manifest-receive", map[string]any{
+		"expectedVersion": manifest.Version, "receivedWeightKg": 670, "varianceReason": "现场过磅，少量沾附损耗",
+	})
+	assertStatus(t, response, http.StatusOK)
+	manifest = decodeRecord(t, body)
+	if manifest.Status != "received" || manifest.ReceivedWeightKg == nil || *manifest.ReceivedWeightKg != 670 ||
+		manifest.WeightVarianceKg == nil || *manifest.WeightVarianceKg != -10.5 || manifest.ReceivedAt == nil {
+		t.Fatalf("receipt measurement was not persisted: %+v", manifest)
+	}
+	// Signed manifests are terminal: the receipt and measurements cannot be rewritten.
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", manifest.ID), operator, "receive-again", map[string]any{
+		"expectedVersion": manifest.Version, "receivedWeightKg": 671,
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	signedEdit := manifestPayload("TM-ROUTER-001", "CP-002")
+	signedEdit["expectedVersion"] = manifest.Version
+	response, _ = request(t, engine, http.MethodPut, fmt.Sprintf("/api/manifests/%d", manifest.ID), operator, "edit-signed", signedEdit)
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	// Only now may compliance pass.
 	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", check.ID), reviewer, "reviewer-decision", map[string]any{
-		"status": "pass", "expectedVersion": check.Version, "reason": "all four evidence groups verified",
+		"status": "pass", "expectedVersion": check.Version, "reason": "all four evidence groups verified after receipt",
 	})
 	assertStatus(t, response, http.StatusOK)
 	check = decodeRecord(t, body)
@@ -129,9 +182,42 @@ func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 		t.Fatalf("review decision was not persisted: %+v", check)
 	}
 
+	// Receipts over the planned weight by more than 5% are rejected and require a difference reason.
+	response, body = request(t, engine, http.MethodPost, "/api/manifests", operator, "manifest-create-overweight", manifestPayload("TM-ROUTER-004", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	overweight := decodeRecord(t, body)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", overweight.ID), operator, "overweight-submit", map[string]any{
+		"status": "submitted", "expectedVersion": overweight.Version, "reason": "linked permits checked",
+	})
+	assertStatus(t, response, http.StatusOK)
+	overweight = decodeRecord(t, body)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", overweight.ID), operator, "overweight-ship", map[string]any{
+		"status": "in_transit", "expectedVersion": overweight.Version, "reason": "carrier accepted the load",
+	})
+	assertStatus(t, response, http.StatusOK)
+	overweight = decodeRecord(t, body)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", overweight.ID), operator, "overweight-no-reason", map[string]any{
+		"expectedVersion": overweight.Version, "receivedWeightKg": 715,
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/receive", overweight.ID), operator, "overweight-reject", map[string]any{
+		"expectedVersion": overweight.Version, "receivedWeightKg": 715, "varianceReason": "实收重量超计划 5%，疑似混入其他批次",
+	})
+	assertStatus(t, response, http.StatusOK)
+	overweight = decodeRecord(t, body)
+	if overweight.Status != "rejected" || overweight.ReceivedWeightKg == nil || *overweight.ReceivedWeightKg != 715 ||
+		overweight.WeightVarianceKg == nil || *overweight.WeightVarianceKg != 34.5 || overweight.VarianceReason == "" {
+		t.Fatalf("overweight receipt should be rejected with a variance reason: %+v", overweight)
+	}
+	response, body = request(t, engine, http.MethodGet, "/api/manifests?page=1&pageSize=20", operator, "list-receipt-fields", nil)
+	assertStatus(t, response, http.StatusOK)
+	if !bytes.Contains(body, []byte(`"receivedWeightKg":715`)) || !bytes.Contains(body, []byte("疑似混入其他批次")) {
+		t.Fatalf("manifest list must expose received weight and variance reason: %s", string(body))
+	}
+
 	response, body = request(t, engine, http.MethodGet, "/api/audits?page=1&pageSize=100", reviewer, "audit-read", nil)
 	assertStatus(t, response, http.StatusOK)
-	if !bytes.Contains(body, []byte("manifest-submit")) || !bytes.Contains(body, []byte("reviewer-decision")) {
+	if !bytes.Contains(body, []byte("manifest-submit")) || !bytes.Contains(body, []byte("reviewer-decision")) || !bytes.Contains(body, []byte("manifest-receive")) {
 		t.Fatalf("expected request IDs in immutable audit list: %s", string(body))
 	}
 	var envelope apiEnvelope
