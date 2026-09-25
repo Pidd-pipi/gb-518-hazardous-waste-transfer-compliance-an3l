@@ -1,0 +1,4 @@
+
+import { Component, EventEmitter, Input, Output } from '@angular/core'; import { CommonModule } from '@angular/common'; import { MatButtonModule } from '@angular/material/button';
+@Component({ selector: 'app-confirm-dialog', standalone: true, imports: [MatButtonModule, CommonModule], template: `<div *ngIf="open" class="modal-backdrop" (click)="cancel.emit()"><section class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" (click)="$event.stopPropagation()"><h2 id="confirm-title">{{ title }}</h2><ng-content></ng-content><footer><button mat-button (click)="cancel.emit()">取消</button><button mat-flat-button color="primary" (click)="confirm.emit()">确认</button></footer></section></div>` })
+export class ConfirmDialogComponent { @Input() open = false; @Input() title = ''; @Output() confirm = new EventEmitter<void>(); @Output() cancel = new EventEmitter<void>(); }

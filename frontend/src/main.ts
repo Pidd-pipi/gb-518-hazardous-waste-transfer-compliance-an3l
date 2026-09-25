@@ -1,0 +1,2 @@
+
+import 'zone.js'; import '@angular/material/prebuilt-themes/indigo-pink.css'; import './styles.css'; import { provideAnimations } from '@angular/platform-browser/animations'; import { bootstrapApplication } from '@angular/platform-browser'; import { provideRouter } from '@angular/router'; import { AppComponent } from './app.component'; import { routes } from './router'; bootstrapApplication(AppComponent, { providers: [provideRouter(routes), provideAnimations()] }).catch(console.error);
